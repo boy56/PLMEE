@@ -13,7 +13,7 @@ from extractor_model import TriggerExtractor, ArgumentExtractor
 # from extractor_tester import test_argument_extractor
 from extractor_tester import test_trigger_extractor, test_argument_extractor_pipeline
 from cfg import args
-from acereader import DataMeta, TriggerReader, RoleReader
+from dueereader import DataMeta, TriggerReader, RoleReader
 
 
 def argument_dataset_statistics(train_dataset, val_dataset, dataset_meta):
@@ -163,7 +163,7 @@ if __name__ == '__main__':
         pretrained_model=args.bert_vocab,
         use_starting_offsets=True,
         do_lowercase=False)}
-    data_meta = DataMeta()
+    data_meta = DataMeta(event_id_file=args.data_meta_dir + "/events.id", role_id_file=args.data_meta_dir + "/roles.id")
     trigger_reader = TriggerReader(data_meta=data_meta, token_indexer=bert_indexer)
     role_reader = RoleReader(data_meta=data_meta, token_indexer=bert_indexer)
 
