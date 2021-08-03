@@ -10,10 +10,8 @@ from allennlp.data.vocabulary import Vocabulary
 from allennlp.data.iterators import BucketIterator
 from allennlp.training.learning_rate_schedulers.learning_rate_scheduler import _PyTorchLearningRateSchedulerWrapper
 from extractor_model import TriggerExtractor, ArgumentExtractor
-# from extractor_tester import test_argument_extractor
-from extractor_tester import test_trigger_extractor, test_argument_extractor_pipeline
 from cfg import args
-from dueereader import DataMeta, TriggerReader, RoleReader
+from dueereader import DataMeta, TriggerReader, RoleReader, ETRoleReader, ETTextReader
 
 
 def argument_dataset_statistics(train_dataset, val_dataset, dataset_meta):
@@ -115,10 +113,10 @@ def train_argument_extractor(data_meta, vocab, iterator, train_dataset, val_data
         num_epochs=args.extractor_epoc,
         serialization_dir=serialization_dir,
         num_serialized_models_to_keep=1,
+        validation_metric='+r_c_f', # 需要与metric中的字段一致, +/- 参照trianer中的定义
         learning_rate_scheduler=learning_rate_scheduler,
         cuda_device=args.extractor_cuda_device)
     trainer.train()
-    # test_argument_extractor(argument_extractor, iterator, train_dataset, val_dataset, data_meta)
     return argument_extractor
 
 
@@ -151,10 +149,10 @@ def train_trigger_extractor(data_meta, vocab, iterator, train_dataset, val_datas
         num_epochs=args.extractor_epoc,
         serialization_dir=args.extractor_origin_trigger_dir,
         num_serialized_models_to_keep=3,
+        validation_metric='+t_c_f', # 需要与metric中的返回字段一致, +/- 参照trianer中的定义
         learning_rate_scheduler=learning_rate_scheduler,
         cuda_device=args.extractor_cuda_device)
     trainer.train()
-    # test_trigger_extractor(trigger_extractor, iterator, train_dataset, val_dataset, data_meta)
 
 
 if __name__ == '__main__':
@@ -163,38 +161,27 @@ if __name__ == '__main__':
         pretrained_model=args.bert_vocab,
         use_starting_offsets=True,
         do_lowercase=False)}
+    
     data_meta = DataMeta(event_id_file=args.data_meta_dir + "/events.id", role_id_file=args.data_meta_dir + "/roles.id")
-    trigger_reader = TriggerReader(data_meta=data_meta, token_indexer=bert_indexer)
-    role_reader = RoleReader(data_meta=data_meta, token_indexer=bert_indexer)
+    # print(args.istrigger)
+    # print(args.isETid)
+    if args.istrigger: # 原版PLMEE方式
+        trigger_reader = TriggerReader(data_meta=data_meta, token_indexer=bert_indexer)
+        role_reader = RoleReader(data_meta=data_meta, token_indexer=bert_indexer)
 
-    # ==== dataset =====
-    trigger_train_dataset = trigger_reader.read(args.extractor_train_file)
+        # trigger数据加载
+        trigger_train_dataset = trigger_reader.read(args.extractor_train_file)
+        trigger_val_dataset = trigger_reader.read(args.extractor_val_file)
+
+        if args.do_train_trigger: # trigger 训练
+            train_trigger_extractor(data_meta, vocab, iterator, trigger_train_dataset, trigger_val_dataset)
+    else:
+        role_reader = ETRoleReader(data_meta=data_meta, token_indexer=bert_indexer, isETid=args.isETid)
+
+    # role 数据加载
     role_train_dataset = role_reader.read(args.extractor_train_file)
-    trigger_val_dataset = trigger_reader.read(args.extractor_val_file)
     role_val_dataset = role_reader.read(args.extractor_val_file)
     data_meta.compute_AF_IEF(role_train_dataset)
-
-    # import heapq
-    # import numpy as np
-    # k = 2
-    # af, ief = data_meta.af, data_meta.ief
-    # event_num = len(data_meta.event_types)
-    # role_num = len(data_meta.role_labels)
-    # af_ief = af * ief.reshape(role_num, -1)
-    # for id in range(event_num):
-    #     et = data_meta.get_event_type_name(id)
-    #     print(et + ':')
-    #     roles_score = af_ief[:, id]
-    #     roles_score = roles_score / np.sum(roles_score)
-    #     k_indexs = heapq.nlargest(k, range(role_num), roles_score.__getitem__)
-    #     k_scores = heapq.nlargest(k, roles_score)
-    #     #has_score = roles_score > 0
-    #     #print(np.sum(has_score))
-    # 
-    #     print(data_meta.get_role_name(k_indexs))
-    #     print(np.sum(k_scores))
-    #     print()
-    # raise NotImplementedError
 
     # ==== iterator =====
     vocab = Vocabulary()
@@ -203,8 +190,7 @@ if __name__ == '__main__':
         batch_size=args.extractor_batch_size)
     iterator.index_with(vocab)
     # argument_dataset_statistics(role_train_dataset, role_val_dataset, data_meta)
-    if args.do_train_trigger:
-        train_trigger_extractor(data_meta, vocab, iterator, trigger_train_dataset, trigger_val_dataset)
+
     if args.do_train_argument:
         assert not (args.train_argument_with_generation and args.train_argument_only_with_generation)
 
@@ -223,5 +209,3 @@ if __name__ == '__main__':
             generated_dataset = role_reader.read(generated_file)
             role_train_dataset = generated_dataset
         role_extractor = train_argument_extractor(data_meta, vocab, iterator, role_train_dataset, role_val_dataset)
-    if args.do_test:
-        test_argument_extractor_pipeline(trigger_val_dataset, role_val_dataset, iterator, data_meta)

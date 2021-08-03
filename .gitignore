@@ -7,6 +7,7 @@ __pycache__
 data/
 save/
 result/
+output/
 
 db.sqlite3
 
@@ -15,3 +16,4 @@ db.sqlite3
 *.docx
 *.doc
 *.csv
+slurm-*

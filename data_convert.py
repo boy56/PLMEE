@@ -1,15 +1,14 @@
-# 将DUEE数据文件改成PLMEE读取的格式
+# 数据文件预处理 (以DUEE数据为例)
 import codecs
 import json
 import tqdm
 import os
-from allennlp.data.tokenizers import Token
 
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 获取当前目录文件夹
-EventExp_dir = os.path.dirname(current_dir) # 获取当前文件的父目录
+# 1、根据 train 与 dev 构建 events.id (事件类型统计) 与 roles.id(角色类型统计)
+train_path = "data/DUEE/train.json"
+test_path = "data/DUEE/dev.json"
+output_path = "data/DUEE/"
 
-train_path = "data/DuEE-Fin/basepre/train.json"
-test_path = "data/DuEE-Fin/basepre/dev.json"
 path_list = [train_path, test_path]
 
 event_dict = {} # 所有的事件类型
@@ -18,11 +17,6 @@ for filename in path_list:
     with codecs.open(filename, 'r', 'UTF-8') as rf:
         for line in rf.readlines():
             line = json.loads(line)
-
-            # print(line)
-            # words = line['text']
-            # tokens = [Token(word) for word in words]
-            # print(tokens)
 
             for event in line['event_list']:
                 event_type = event['event_type']
@@ -37,13 +31,17 @@ for filename in path_list:
 
 
 # 将event_dict 与 role_dict 处理为event.id、role.id 文件
-with codecs.open("PLMEE/data/DuEE-Fin/events.id", 'w', 'UTF-8') as wf:
+with codecs.open(output_path + "events.id", 'w', 'UTF-8') as wf:
     for i, (et, value) in enumerate(event_dict.items()):
         wf.write(str(i) + "\t" + et + "\t" + str(value) + "\n")
-del role_dict['环节']
-with codecs.open("PLMEE/data/DuEE-Fin/roles.id", 'w', 'UTF-8') as wf:
+
+with codecs.open(output_path + "roles.id", 'w', 'UTF-8') as wf:
     for i, (rl, value) in enumerate(role_dict.items()):
         wf.write(str(i) + "\t" + rl + "\t" + str(value) + "\n")
+
+
+# 2、根据schema文件构建events.id 与 roles.id
+
 
 
 

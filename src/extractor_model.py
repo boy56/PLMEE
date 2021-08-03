@@ -4,7 +4,7 @@ from copy import deepcopy
 from allennlp.models import Model
 from allennlp.nn.util import sequence_cross_entropy_with_logits
 
-from extractormetric import TriggerMetric, ArgumentMetric
+from extractor_metric import TriggerMetric, ArgumentMetric
 from cfg import args
 
 

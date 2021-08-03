@@ -11,7 +11,7 @@ import torch
 
 from extractor_model import TriggerExtractor, ArgumentExtractor
 from acereader import CustomSpanField
-from extractormetric import ExtractorMetric
+from extractor_metric import ExtractorMetric
 from cfg import args
 
 

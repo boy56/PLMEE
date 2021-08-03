@@ -1,11 +1,10 @@
-# input: test json file   {"sentence": foo, "id": }
-# output: test result json file 比赛结果格式
 from allennlp.modules.token_embedders.bert_token_embedder import PretrainedBertEmbedder
 from allennlp.data.token_indexers.wordpiece_indexer import PretrainedBertIndexer
 from allennlp.data.vocabulary import Vocabulary
 from allennlp.data.fields import ListField, LabelField, ArrayField
 from allennlp.nn import util
 from allennlp.data.instance import Instance
+from allennlp.data.iterators import BucketIterator
 
 import argparse
 import numpy as np
@@ -18,9 +17,8 @@ import codecs
 import json
 
 from extractor_model import TriggerExtractor, ArgumentExtractor
-from dueereader import CustomSpanField, DataMeta, TriggerReader, RoleReader, TextReader, TextReaderPro
-from allennlp.data.iterators import BucketIterator
-from extractormetric import ExtractorMetric
+from extractor_metric import ExtractorMetric
+from dueereader import DataMeta, TriggerReader, RoleReader, ETRoleReader, ETTextReader
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   # 设备
 device_num = -1
@@ -43,13 +41,12 @@ parser.add_argument('--extractor_test_file', type=str)
 parser.add_argument('--extractor_batch_size', type=int, default=28)
 parser.add_argument('--extractor_argument_prob_threshold', type=float, default=0.5)
 
-parser.add_argument('--mode', type=str, default='DuEE', help="DuEE or DuEE-Fin") # DuEE or DuEE-Fin
-parser.add_argument('--bert_mode', type=str, default='bert_base', help='bert_base or bert_large') # bert_base or bert_large
-parser.add_argument('--et_mode', action="store_true", help='if set it, mode is et + ner')
+parser.add_argument('--task_name', type=str, default='DuEE', help="DuEE or DuEE-Fin") # DuEE or DuEE-Fin
+
+parser.add_argument('--istrigger', action="store_true") # True: trigger + argument方式; False: ET + text -> argument方式
+parser.add_argument('--isETid', action="store_true") # 在上述为False时, True: ETid + text, False: ETText + text
 
 args = parser.parse_args()
-
-
 
 # trigger 提取步骤
 def trigger_extractor_deal(pre_dataset, iterator, trigger_model_path, dataset_meta):
@@ -187,31 +184,65 @@ def argument_extractor_deal(instances, iterator, argument_model_path, dataset_me
     # print(pred_spans)
     return pred_spans
 
+# 基于et分类的role 提取步骤
+def argument_et_extractor_deal(instances, iterator, argument_model_path, dataset_meta):
+    pretrained_bert = PretrainedBertEmbedder(
+        pretrained_model=args.pretrained_bert,
+        requires_grad=True,
+        top_layer_only=True)
+
+    argument_extractor = ArgumentExtractor(
+        vocab=Vocabulary(),
+        embedder=pretrained_bert,
+        role_num=dataset_meta.get_role_num(),
+        event_roles=dataset_meta.event_roles,
+        prob_threshold=args.extractor_argument_prob_threshold,
+        af=0,
+        ief=0)
+    
+    # 加载argument_model_path下的模型
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   # 设备
+    # model_state = torch.load(argument_model_path, map_location=util.device_mapping(-1))
+    model_state = torch.load(argument_model_path, map_location=device)
+    argument_extractor.load_state_dict(model_state)
+    argument_extractor.to(device)
+    argument_extractor.eval()
+    
+    batch_idx = 0
+    pred_spans = {}
+    for data in iterator(instances, num_epochs=1):
+        print(batch_idx)
+        batch_idx += 1
+        data = util.move_to_device(data, cuda_device=device_num)
+        # print(data)
+        sentence = data['sentence']
+        sentence_id = data['sentence_id']
+        type_ids = data['type_ids']
+        event_type = data['event_type']
+        output = argument_extractor(sentence, sentence_id, type_ids, event_type)
+        batch_spans = argument_extractor.metric.get_span(output['start_logits'], output['end_logits'], event_type)
+
+        for idb, batch_span in enumerate(batch_spans):
+            s_id = sentence_id[idb]
+            if s_id not in pred_spans: # 将相同sentence id的结果进行合并
+                pred_spans[s_id] = []
+            pred_spans[s_id].extend(batch_span)
+    
+    # print(pred_spans)
+    return pred_spans
+
 
 if __name__ == "__main__":
     
-    # print(args.extractor_test_file)
-    # print(args.save_trigger_dir)
 
     # ==== indexer and reader =====
     bert_indexer = {'tokens': PretrainedBertIndexer(
         pretrained_model=args.bert_vocab,
         use_starting_offsets=True,
         do_lowercase=False)}
+    
     data_meta = DataMeta(event_id_file=args.data_meta_dir + "/events.id", role_id_file=args.data_meta_dir + "/roles.id")
     
-    trigger_reader = TriggerReader(data_meta=data_meta, token_indexer=bert_indexer)
-    role_reader = RoleReader(data_meta=data_meta, token_indexer=bert_indexer)
-
-    # ==== dataset =====
-    trigger_train_dataset = trigger_reader.read(args.extractor_train_file)
-    role_train_dataset = role_reader.read(args.extractor_train_file)
-    trigger_val_dataset = trigger_reader.read(args.extractor_val_file)
-    role_val_dataset = role_reader.read(args.extractor_val_file)
-    data_meta.compute_AF_IEF(role_train_dataset) # 根据AF_IEF来计算role的重要程度
-    # print(trigger_val_dataset)
-    # print(pre_dataset)
-
     # ==== iterator =====
     vocab = Vocabulary()
     iterator = BucketIterator(
@@ -222,60 +253,103 @@ if __name__ == "__main__":
     trigger_model_path = args.save_trigger_dir
     argument_model_path = args.save_role_dir
     
-    result_dir = "./data/" + args.mode + "/tmp/" + args.bert_mode
+    # ==== output path ====
+    result_dir = "./output/" + args.task_name
     instance_pkl_path = result_dir + "/tirgger_deal_instance.pkl"
     result_pkl_path = result_dir + "/role_result.pkl"
-    output_file =  result_dir + "/" + args.mode + ".json"
+    output_file =  result_dir + "/" + args.task_name + "_result.json"
 
     if not os.path.exists(result_dir):
         os.makedirs(result_dir)
 
-    text_reader = TextReader(data_meta=data_meta, token_indexer=bert_indexer)
-    pre_dataset = text_reader.read(args.extractor_test_file) # 用来预测的文件
+    # ==== predict ====
+    if args.istrigger: # 原版PLMEE trigger + role 方式
+        # ==== dataset =====
+        # 加载train 和 val 数据集 用来填充data_meta中的计数模块 (所以采用何种reader在该环节都不影响)
+        # 后续可更改为: 1、et与rt关系从schema中读取   2、role权重用二进制文件在训练时进行保存的形式
+        trigger_reader = TriggerReader(data_meta=data_meta, token_indexer=bert_indexer)
+        role_reader = RoleReader(data_meta=data_meta, token_indexer=bert_indexer)
+        trigger_train_dataset = trigger_reader.read(args.extractor_train_file)
+        role_train_dataset = role_reader.read(args.extractor_train_file)
+        trigger_val_dataset = trigger_reader.read(args.extractor_val_file)
+        role_val_dataset = role_reader.read(args.extractor_val_file)
+        
+        data_meta.compute_AF_IEF(role_train_dataset) # 根据AF_IEF来计算role的重要程度
+        
+        text_reader = TextReader(data_meta=data_meta, token_indexer=bert_indexer)
+        pre_dataset = text_reader.read(args.extractor_test_file) # 用来预测的文件
+        
+        print('=====> Extracting triggers...')
+        if not os.path.exists(instance_pkl_path):
+            instances = trigger_extractor_deal(pre_dataset=pre_dataset, iterator=iterator, trigger_model_path=trigger_model_path, dataset_meta=data_meta)
+            pkl.dump(instances, open(instance_pkl_path, 'wb'))
+        else:
+            instances = pkl.load(open(instance_pkl_path, 'rb'))
+        print("instances num:", len(instances))
+
+        print('=====> Extracting arguments...')
+        if not os.path.exists(result_pkl_path):
+            pred_spans = argument_extractor_deal(instances=instances, iterator=iterator, argument_model_path=argument_model_path, dataset_meta=data_meta)
+            pkl.dump(pred_spans, open(result_pkl_path, 'wb'))
+        else:
+            pred_spans = pkl.load(open(result_pkl_path, 'rb'))
     
-    print('=====> Extracting triggers...')
-    if not os.path.exists(instance_pkl_path):
-        instances = trigger_extractor_deal(pre_dataset=pre_dataset, iterator=iterator, trigger_model_path=trigger_model_path, dataset_meta=data_meta)
-        pkl.dump(instances, open(instance_pkl_path, 'wb'))
-    else:
-        instances = pkl.load(open(instance_pkl_path, 'rb'))
-    print("instances num:", len(instances))
-    # exit(0)
-    print('=====> Extracting arguments...')
-    if not os.path.exists(result_pkl_path):
-        pred_spans = argument_extractor_deal(instances=instances, iterator=iterator, argument_model_path=argument_model_path, dataset_meta=data_meta)
-        pkl.dump(pred_spans, open(result_pkl_path, 'wb'))
-    else:
-        pred_spans = pkl.load(open(result_pkl_path, 'rb'))
+    else: # 改进版本, ET + role 方式
+        # ==== dataset =====
+        # 加载train 和 val 数据集 用来填充data_meta中的计数模块 (所以采用何种reader在该环节都不影响)
+        # 后续可更改为: 1、et与rt关系从schema中读取   2、role权重用二进制文件在训练时进行保存的形式
+        role_reader = ETRoleReader(data_meta=data_meta, token_indexer=bert_indexer, isETid=args.isETid)
+        role_train_dataset = role_reader.read(args.extractor_train_file)
+        role_val_dataset = role_reader.read(args.extractor_val_file)
+        
+        data_meta.compute_AF_IEF(role_train_dataset) # 根据AF_IEF来计算role的重要程度
+        text_reader = ETTextReader(data_meta=data_meta, token_indexer=bert_indexer, isETid=args.isETid)
+        pre_dataset = text_reader.read(args.extractor_test_file) # 用来预测的文件
+        print('=====> Extracting arguments...')
+        if not os.path.exists(result_pkl_path):
+            pred_spans = argument_et_extractor_deal(instances=pre_dataset, iterator=iterator, argument_model_path=argument_model_path, dataset_meta=data_meta)
+            pkl.dump(pred_spans, open(result_pkl_path, 'wb'))
+        else:
+            pred_spans = pkl.load(open(result_pkl_path, 'rb'))
     
+    # ==== output to json ====
     print('=====> output to json files: ', output_file)
-    if args.mode == "DuEE":
-        id_sentence = {} # sid 与sentence 对应关系
-        for data in pre_dataset:
-            id_sentence[data['sentence_id'].metadata] = data['origin_text'].metadata
-        with codecs.open(output_file, 'w', 'UTF-8') as f:
-            for sid, pred_span in pred_spans.items():
-                text = id_sentence[sid]
-                # print(text)
-                tmp = {}
-                tmp['id'] = sid
-                tmp_elist = []
-                for ids, span in enumerate(pred_span):
-                    e_dict = {}
-                    e_dict['event_type'] = data_meta.get_event_type_name(span[3])
-                    e_dict['arguments'] = [
-                        {
-                            "role": data_meta.get_role_name(span[2]),
-                            "argument": text[span[0]: span[1] + 1]
-                        }
-                    ]
 
-                    tmp_elist.append(e_dict)
-                tmp['event_list'] = tmp_elist
-                tmp = json.dumps(tmp, ensure_ascii=False)
-                f.write(tmp + "\n")
+    id_sentence = {} # sid 与sentence 对应关系
+    for data in pre_dataset:
+        id_sentence[data['sentence_id'].metadata] = data['origin_text'].metadata
+    with codecs.open(output_file, 'w', 'UTF-8') as f:
+        for sid, pred_span in pred_spans.items():
+            text = id_sentence[sid]
+            # print(text)
+            tmp = {}
+            tmp['id'] = sid
+            tmp_elist = []
+            for ids, span in enumerate(pred_span):
+                e_dict = {}
+                e_dict['event_type'] = data_meta.get_event_type_name(span[3])
+                
+                if args.istrigger:  # PLMEE 原版
+                    argument = text[span[0]: span[1] + 1]
+                else:  # et/etid + text 版本
+                    if args.isETid: argument = text[span[0]-1-1: span[1] + 1-len(e_dict['event_type'])-1] # etid + text 
+                    else: argument = text[span[0]-len(e_dict['event_type'])-1: span[1] + 1-len(e_dict['event_type'])-1] # et + text
+                
+                e_dict['arguments'] = [
+                    {
+                        "role": data_meta.get_role_name(span[2]),
+                        "argument": argument
+                    }
+                ]
 
-    elif args.mode == "DuEE-Fin":
+                tmp_elist.append(e_dict)
+            tmp['event_list'] = tmp_elist
+            tmp = json.dumps(tmp, ensure_ascii=False)
+            f.write(tmp + "\n")
+
+    '''
+    # DuEE-Fin 篇章级文本处理方案
+    if args.task_name == "DuEE-Fin":
         id_sentence = {} # sent_id 与 origin_text 对应关系
         sentid_textid = {} # sent_id 与 text_id 对应关系, sent_id由内容而定, 不唯一
         for data in pre_dataset:
@@ -345,3 +419,4 @@ if __name__ == "__main__":
                 
                 tmp = json.dumps(tmp, ensure_ascii=False)
                 f.write(tmp + "\n")
+    '''

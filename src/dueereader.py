@@ -9,6 +9,7 @@ from overrides import overrides
 import torch
 import json
 import codecs
+import uuid
 
 
 class DataMeta:
@@ -123,7 +124,8 @@ class TriggerReader(DatasetReader):
     def str_to_instance(self, line):
         # DUEE Reader
         line = json.loads(line)
-        sentence_id = line['id']
+        # sentence_id = line['id']
+        sentence_id = line.get('id', uuid.uuid3(uuid.NAMESPACE_DNS,line['text'])) # 如果不存在id则根据文本内容创建uuid
         # sentence_id_field = LabelField(label=sentence_id, skip_indexing=True, label_namespace='sentence_id') # LabelField 用来存储label而不是id
         sentence_id_field = MetadataField(sentence_id)
         words = line['text']
@@ -174,7 +176,8 @@ class RoleReader(DatasetReader):
         # DUEE Reader
         instances = []
         line = json.loads(line)
-        sentence_id = line['id']
+        # sentence_id = line['id']
+        sentence_id = line.get('id', uuid.uuid3(uuid.NAMESPACE_DNS,line['text'])) # 如果不存在id则根据文本内容创建uuid
         words = line['text']
 
 
@@ -285,6 +288,155 @@ class TextReader(DatasetReader):
             lines = f.readlines()
             for line in lines:
                 yield self.str_to_instance(line) 
+
+
+# 不识别trigger, 将et内容拼在sentence前面进行训练
+# 修改参考: https://guide.allennlp.org/representing-text-as-features#6
+class ETRoleReader(DatasetReader):
+    def __init__(self, data_meta, token_indexer, isETid=False):
+        super().__init__()
+        self.token_indexer = token_indexer
+        self.data_meta = data_meta
+        self.wordpiece_tokenizer = token_indexer['tokens'].wordpiece_tokenizer
+        self.isETid = isETid # 拼接时是否采用etid, 若为True, 采用 etid + text 形式, 若为False, 采用 ettext + text的形式
+
+    def str_to_instance(self, line):
+        instances = []
+        line = json.loads(line)
+        words = line['text']
+        sentence_id = line.get('id', uuid.uuid3(uuid.NAMESPACE_DNS,words)) # 如果不存在id则根据文本内容创建uuid
+
+        for event in line['event_list']:
+            et = event['event_type']
+            et_id = self.data_meta.get_event_type_id(event['event_type'])            
+            
+            # 处理输入的type id 信息
+            type_ids = [0] # [CLS]为0的位置
+            if self.isETid: type_ids = type_ids + [0]  # etid + text拼接, 注意 et 拼在前面的话会影响role index 标签
+            else: type_ids = type_ids + [0] * len(et)  # et + text拼接
+            type_ids.append(0) # 中间的[SEP]标记
+            type_ids.extend([1] * len(words)) # 文本的type标记
+            type_ids.append(1) # 最后的[SEP]标记
+            type_ids = np.array(type_ids)
+            
+            # 处理输入的word tokens 信息
+            if self.isETid: tokens = [Token(str(et_id))] + [Token('[SEP]')] + [Token(word) for word in words] # et_id + text
+            else: tokens = [Token(w) for w in et] + [Token('[SEP]')] + [Token(word) for word in words] # et + text
+
+            # 构造filed信息
+            sentence_field = TextField(tokens, self.token_indexer)
+            sentence_id_field = MetadataField(sentence_id)
+            type_ids_field = ArrayField(type_ids) # 用来标识trigger的位置
+            event_type_field = LabelField(label=et_id, skip_indexing=True, label_namespace='event_labels')
+
+            # 处理role的信息
+            role_field_list = []
+            for argument in event['arguments']:
+                if 'argument_start_index' not in argument:
+                    continue
+
+                role = argument['argument']
+                role_type = argument['role']
+                
+                # 当类别信息拼在句子前面时, 需要修改start_index信息
+                if self.isETid: role_span_start = argument['argument_start_index'] + 1 + 1 # etid长度 + [SEP]
+                else: role_span_start = argument['argument_start_index'] + len(et) + 1 # et长度 + [SEP]
+                
+                role_span_end = role_span_start + len(role) - 1
+                role_id = self.data_meta.get_role_id(role_type)
+                self.data_meta.add_event_role(et_id, role_id) # 加载数据的时候更新schema
+                role_field_list.append(CustomSpanField(role_span_start, role_span_end, role_id, et_id))
+            if role_field_list == []:
+                role_field_list.append(CustomSpanField(-1, -1, -1, -1))
+            roles_field = ListField(role_field_list)
+            fields = {'sentence': sentence_field}
+            fields['sentence_id'] = sentence_id_field
+            fields['type_ids'] = type_ids_field
+            fields['event_type'] = event_type_field
+            fields['roles'] = roles_field
+            instances.append(Instance(fields))
+        return instances
+
+    def _read(self, event_file):
+        with codecs.open(event_file, 'r', 'UTF-8') as f:
+            lines = f.readlines()
+            for line in lines:
+                instances = self.str_to_instance(line)
+                for instance in instances:
+                    yield instance
+
+
+# ET + text 作为测试集/具体应用的输入
+class ETTextReader(DatasetReader):
+    def __init__(self, data_meta, token_indexer, isETid=False):
+        super().__init__()
+        self.token_indexer = token_indexer
+        self.data_meta = data_meta
+        self.wordpiece_tokenizer = token_indexer['tokens'].wordpiece_tokenizer
+        self.isETid = isETid # 拼接时是否采用etid, 若为True, 采用 etid + text 形式, 若为False, 采用 ettext + text的形式
+
+    def str_to_instance(self, line):
+        # 纳入et信息
+        
+        line = json.loads(line)
+        
+        words = line['text']
+        et_list = line['et_list']
+        instances = []
+
+        for et in et_list:
+            words_field = MetadataField(words)
+            # print(et)
+            # print(self.data_meta.event_types)
+            et_id = self.data_meta.get_event_type_id(et) # 获取事件id
+
+            # 处理输入的type id 信息
+            type_ids = [0] # [CLS]为0的位置
+            if self.isETid: type_ids = type_ids + [0]  # etid + text拼接
+            else: type_ids = type_ids + [0] * len(et)  # et + text拼接
+            type_ids.append(0) # 中间的[SEP]标记
+            type_ids.extend([1] * len(words))
+            type_ids.append(1) # 最后的[SEP]标记
+            type_ids = np.array(type_ids)
+
+            # 处理输入的word tokens 信息
+            if self.isETid: tokens = [Token(str(et_id))] + [Token('[SEP]')] + [Token(word) for word in words] # et_id + text
+            else: tokens = [Token(w) for w in et] + [Token('[SEP]')] + [Token(word) for word in words] # et + text
+            
+            # 构造filed数据
+            sentence_field = TextField(tokens, self.token_indexer)
+            type_ids_field = ArrayField(type_ids) # 用来标识et的位置
+            event_type_field = LabelField(label=et_id, skip_indexing=True)
+
+            fields = {'sentence': sentence_field}
+            fields['origin_text'] = words_field
+            fields['type_ids'] = type_ids_field
+            fields['event_type'] = event_type_field
+
+            if 'sent_id' in line: # DuEE-Fin 用来标识句子id
+                sentence_id = line['sent_id']
+                sentence_id_field = MetadataField(sentence_id)
+                fields['sentence_id'] = sentence_id_field
+
+                text_id = line['id']
+                text_id_field = MetadataField(text_id)
+                fields['text_id'] = text_id_field
+            else: # DuEE
+                sentence_id = line['id']
+                sentence_id_field = MetadataField(sentence_id)
+                fields['sentence_id'] = sentence_id_field
+            
+            instances.append(Instance(fields))
+
+        return instances
+
+    def _read(self, event_file):
+        with codecs.open(event_file, 'r', 'UTF-8') as f:
+            lines = f.readlines()
+            for line in lines:
+                instances = self.str_to_instance(line)
+                for instance in instances:
+                    yield instance
 
 
 class CustomSpanField(Field[torch.Tensor]):
