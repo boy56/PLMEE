@@ -161,6 +161,13 @@ if __name__ == '__main__':
         pretrained_model=args.bert_vocab,
         use_starting_offsets=True,
         do_lowercase=False)}
+
+    # ==== iterator =====
+    vocab = Vocabulary()
+    iterator = BucketIterator(
+        sorting_keys=[('sentence', 'num_tokens')],
+        batch_size=args.extractor_batch_size)
+    iterator.index_with(vocab)
     
     data_meta = DataMeta(event_id_file=args.data_meta_dir + "/events.id", role_id_file=args.data_meta_dir + "/roles.id")
     # print(args.istrigger)
@@ -183,12 +190,7 @@ if __name__ == '__main__':
     role_val_dataset = role_reader.read(args.extractor_val_file)
     data_meta.compute_AF_IEF(role_train_dataset)
 
-    # ==== iterator =====
-    vocab = Vocabulary()
-    iterator = BucketIterator(
-        sorting_keys=[('sentence', 'num_tokens')],
-        batch_size=args.extractor_batch_size)
-    iterator.index_with(vocab)
+
     # argument_dataset_statistics(role_train_dataset, role_val_dataset, data_meta)
 
     if args.do_train_argument:
